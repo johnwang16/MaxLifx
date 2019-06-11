@@ -39,7 +39,7 @@ namespace MaxLifx
         private WaveOut _schedulerWaveOut;
         private MaxLifxSettings _settings = new MaxLifxSettings();
 
-        public MainForm()
+        public MainForm(string loadProfileName)
         {
             controllers.Add(_bulbController);
             
@@ -115,6 +115,8 @@ namespace MaxLifx
                 _suspendUi = false;
                 controller.ColourSet += BulbControllerOnColourSet;
             }
+            if(!String.IsNullOrWhiteSpace(loadProfileName))
+            LoadThreads(loadProfileName + ".MaxLifx.Threadset.xml");
         }
 
         private void BulbControllerOnColourSet(object sender, EventArgs eventArgs)
