@@ -33,10 +33,15 @@ namespace MaxLifx.Controllers
 
         public void SetColour(Bulb bulb,  int zone, SetColourPayload payload, bool updateBox)
         {
-            
+
             if (bulb.Zones > 1)
             {
-                var newPayload = new SetColourZonesPayload()
+                byte apply = 0;
+                if(zone == bulb.Zones-1)
+                {
+                    apply = 1;
+                }
+                var newPayload = new SetColourZonesPayload
                 {
                     Brightness = payload.Brightness,
                     Hue = payload.Hue,
@@ -45,18 +50,20 @@ namespace MaxLifx.Controllers
                     TransitionDuration = payload.TransitionDuration,
                     start_index = new byte[] { (byte)zone },
                     end_index = new byte[] { (byte)zone },
-                    apply = new byte[] { 0 }
+                    apply = new byte[] { apply }
                 };
 
                 SendPayloadToMacAddress(newPayload, bulb.MacAddress, bulb.IpAddress);
             }
             else
+            {
                 SendPayloadToMacAddress(payload, bulb.MacAddress, bulb.IpAddress);
 
-            // this updates the bulb monitor, skip for multizone lights
-            if (updateBox)
-            {
-                ColourSet?.Invoke(new LabelAndColourPayload() { Label = bulb.Label, Payload = payload }, null);
+                // this updates the bulb monitor, skip for multizone lights
+                if (updateBox)
+                {
+                    ColourSet?.Invoke(new LabelAndColourPayload() { Label = bulb.Label, Payload = payload }, null);
+                }
             }
         }
 
