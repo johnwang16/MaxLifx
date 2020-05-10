@@ -350,6 +350,11 @@ namespace MaxLifx.Controllers
                                     var label1 = Utils.HexToAscii(Utils.ByteArrayToString(receivebytes).Substring(36 * 2));
                                     bulb.Label = label1.Substring(0, label1.IndexOf('\0'));
 
+                                    var duplicateLabels = Bulbs.Count(x => x.Label == bulb.Label);
+                                    if (duplicateLabels > 1)
+                                    {
+                                        bulb.Label += $"({duplicateLabels-1})";
+                                    }
                                     callback.Invoke();
                                     //f.PopulateBulbListbox();
                                     //f._suspendUi = false;
