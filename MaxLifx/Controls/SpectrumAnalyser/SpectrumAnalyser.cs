@@ -3,7 +3,6 @@ using System.Windows.Forms;
 using System.Collections.Generic;
 using System.Linq;
 using System.Timers;
-using MaxLifx.Processors.ProcessorSettings;
 
 namespace MaxLifx.Controls
 {
@@ -44,7 +43,6 @@ namespace MaxLifx.Controls
         public void AddHandle()
         {
             _handles.Add(new SpectrumAnalyserHandle() { Number = _handles.Count() });
-            
         }
 
         public void RemoveHandle()
@@ -52,7 +50,22 @@ namespace MaxLifx.Controls
             _handles.RemoveAt(_handles.Count()-1);
         }
 
-        public void SetupHandles(List<int> bins, List<int> levels, List<int> levelRanges)
+        public int SetHandleCount(int handles)
+        {
+            var startCount = _handles.Count();
+
+            if(handles > startCount)
+                for (int i = startCount; i < handles; i++)
+                    AddHandle();
+            else
+            if (handles < startCount)
+                for (int i = handles; i < startCount; i++)
+                    RemoveHandle();
+
+            return handles - startCount;
+        }
+
+        public void SetupHandles(List<int> bins, List<int> levels, List<byte> levelRanges)
         {
             for (int i = 0; i < bins.Count(); i++)
             {
@@ -73,83 +86,104 @@ namespace MaxLifx.Controls
                     _handles.RemoveAt(i-1);
         }
 
-        public void GetHandles(out List<int> bins, out List<int> levels, out List<int> levelRanges)
+        public void GetHandles(out List<int> bins, out List<int> levels, out List<byte> levelRanges)
         {
             bins = _handles.Select(x => x.Bin).ToList();
             levels = _handles.Select(x => (int)x.Level).ToList();
-            levelRanges = _handles.Select(x => (int)x.LevelRange).ToList();
+            levelRanges = _handles.Select(x => (byte)x.LevelRange).ToList();
         }
 
-        public List<int> IncrementLevels()
+        public List<byte> ResetRanges()
         {
-            var retVal = new List<int>();
-
-            foreach (var handle in _handles)
-            {
-                handle.Level += 5;
-                if (handle.Level > 255) handle.Level = 255;
-                if (handle.Level + handle.LevelRange > 255) handle.Level = (byte)(255 - handle.Level);
-
-                retVal.Add(handle.Level);
-            }
-            return retVal;
-        }
-
-
-        public List<int> DecrementLevels()
-        {
-            var retVal = new List<int>();
-
-            foreach (var handle in _handles)
-            {
-                handle.Level -= 5;
-                if (handle.Level < 0) handle.Level = 0;
-                if (handle.Level + handle.LevelRange < 0) handle.Level = (byte)(handle.Level);
-
-                retVal.Add(handle.Level);
-            }
-            return retVal;
-        }
-
-
-        public List<int> ResetRanges()
-        {
-            var retVal = new List<int>();
+            var retVal = new List<byte>();
 
             foreach (var handle in _handles)
             {
                 handle.LevelRange = 25;
-                if (handle.Level + handle.LevelRange/2 > 255) handle.LevelRange = (byte)(255 - handle.Level);
-                if (handle.Level - handle.LevelRange/2 <0) handle.LevelRange = (handle.Level);
+                if (handle.Level + ((int)handle.LevelRange)/2 > 255) handle.LevelRange = (byte)(255 - handle.Level);
+                if (handle.Level - ((int)handle.LevelRange)/2 <0) handle.LevelRange = (handle.Level);
 
                 retVal.Add(handle.LevelRange);
             }
             return retVal;
         }
 
-        public void RedistributeBins(SoundResponseSettings settings)
+
+        public (List<int>,List<int>, List<byte>) Redistribute()
         {
-            if (_handles.Count == 0) return;
-
-            double spread = 400 / _handles.Count;
-
-            settings.Bins = new List<int>();
-            settings.Levels = new List<int>();
-            settings.LevelRanges = new List<int>();
+            (List<int>, List<int>, List<byte>) retVal;
+            retVal.Item1 = new List<int>();
+            retVal.Item2 = new List<int>();
+            retVal.Item3 = new List<byte>();
 
             var ctr = 0;
+
             foreach (var handle in _handles)
             {
-                handle.Bin = 10 + (int)(ctr * spread);
-                handle.Level = (byte)(50 - 50 * Math.Pow(1.008, 512 - handle.Bin) / Math.Pow(1.008, 512) + 50);
-                handle.LevelRange = 55;
-                settings.Bins.Add(handle.Bin);
-                settings.Levels.Add(handle.Level);
-                settings.LevelRanges.Add(handle.LevelRange);
+                handle.Bin = 512 * ctr / _handles.Count();
+
+                handle.Level = GetDefaultLevelForBin(handle.Bin);
+                handle.LevelRange = 70;
+
+                retVal.Item1.Add(handle.Bin);
+                retVal.Item2.Add(handle.Level);
+                retVal.Item3.Add(handle.LevelRange);
+
                 ctr++;
             }
-            return;
+            return retVal;
         }
 
+        public (List<int>, List<int>, List<byte>) ShiftUp()
+        {
+            (List<int>, List<int>, List<byte>) retVal;
+            retVal.Item1 = new List<int>();
+            retVal.Item2 = new List<int>();
+            retVal.Item3 = new List<byte>();
+
+            var ctr = 0;
+
+            foreach (var handle in _handles)
+            {
+                handle.Level = (byte)(handle.Level - 10);
+
+                retVal.Item1.Add(handle.Bin);
+                retVal.Item2.Add(handle.Level);
+                retVal.Item3.Add(handle.LevelRange);
+
+                ctr++;
+            }
+            return retVal;
+        }
+
+        public (List<int>, List<int>, List<byte>) ShiftDown()
+        {
+            (List<int>, List<int>, List<byte>) retVal;
+            retVal.Item1 = new List<int>();
+            retVal.Item2 = new List<int>();
+            retVal.Item3 = new List<byte>();
+
+            var ctr = 0;
+
+            foreach (var handle in _handles)
+            {
+                handle.Level = (byte)(handle.Level + 10);
+
+                retVal.Item1.Add(handle.Bin);
+                retVal.Item2.Add(handle.Level);
+                retVal.Item3.Add(handle.LevelRange);
+
+                ctr++;
+            }
+            return retVal;
+        }
+
+        private byte GetDefaultLevelForBin(int bin)
+        {
+            if (bin == 0) return 65;
+            return (byte)(Math.Log(bin/20f+.8f)*13+65);
+        }
     }
+
+
 }

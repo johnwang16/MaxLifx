@@ -106,5 +106,6 @@ namespace MaxLifx.Controls
             _currentHandle = null;
         }
 
+
     }
 }

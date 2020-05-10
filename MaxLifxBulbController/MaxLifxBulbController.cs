@@ -7,19 +7,17 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using MaxLifx.Packets;
-using CUE.NET;
-using CUE.NET.Brushes;
-using System.Drawing;
-using CUE.NET.Devices.Mouse;
-using AuraSDKDotNet;
-using CUE.NET.Devices.Keyboard;
-using CUE.NET.Devices.Generic;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace MaxLifx.Controllers
 {
-
-
-    public class MaxLifxBulbController : IBulbController
+    public class LabelAndColourPayload
+    {
+        public string Label;
+        public SetColourPayload Payload;
+    }
+    public class MaxLifxBulbController
     {
         // Network details
         UdpClient _receivingUdpClient;
@@ -27,193 +25,152 @@ namespace MaxLifx.Controllers
         Socket _sendingSocket;
         IPAddress _sendToAddress;
         IPEndPoint _sendingEndPoint;
-        CorsairMouse Mouse;
-        CorsairKeyboard Keyboard;
-        Dictionary<string, CorsairLed> KeyboardLedDictionary;
-        
-        DateTime lastCorsairUpdate = DateTime.Now;
-        DateTime lastCorsairKbdUpdate = DateTime.Now;
-
-        AuraSDK auraSDK;
-        DateTime lastAuraUpdate = DateTime.Now;
 
         // List of all bulbs discovered
-        public List<Bulb> Bulbs { get; set; } 
-
-        public MaxLifxBulbController()
-        {
-             Bulbs = new List<Bulb>();
-            KeyboardLedDictionary = new Dictionary<string, CorsairLed>();
-        }
+        public List<Bulb> Bulbs = new List<Bulb>();
 
         public event EventHandler ColourSet;
 
-        public void SetColour(string label, SetColourPayload payload)
+        public void SetColour(Bulb bulb,  int zone, SetColourPayload payload, bool updateBox)
         {
-            var bulb = Bulbs.Single(x => x.Label == label);
-            SendPayloadToMacAddress(payload, bulb.MacAddress, bulb.IpAddress);
-
-            ColourSet?.Invoke(new LabelAndColourPayload() { Label = label, Payload = payload }, null);
-        }
-
-        private static ReaderWriterLockSlim _cacheLock = new ReaderWriterLockSlim(), _cacheMouseLock = new ReaderWriterLockSlim();
-
-        public void SendPayloadToMacAddress(IPayload Payload, string macAddress, string ipAddress)
-        {
-            switch (Payload.PayloadType)
+            
+            if (bulb.Zones > 1)
             {
-                case BulbType.Lifx:
-                    var targetMacAddress = Utils.StringToByteArray(macAddress + "0000");
+                var newPayload = new SetColourZonesPayload()
+                {
+                    Brightness = payload.Brightness,
+                    Hue = payload.Hue,
+                    Kelvin = payload.Kelvin,
+                    Saturation = payload.Saturation,
+                    TransitionDuration = payload.TransitionDuration,
+                    start_index = new byte[] { (byte)zone },
+                    end_index = new byte[] { (byte)zone },
+                    apply = new byte[] { 0 }
+                };
 
-                    //Socket sendingSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-                    IPAddress sendToAddress = IPAddress.Parse(ipAddress);
-                    IPEndPoint sendingEndPoint = new IPEndPoint(sendToAddress, 56700);
+                SendPayloadToMacAddress(newPayload, bulb.MacAddress, bulb.IpAddress);
+            }
+            else
+                SendPayloadToMacAddress(payload, bulb.MacAddress, bulb.IpAddress);
 
-                    byte[] sendData = Utils.StringToByteArray(PacketFactory.GetPacket(targetMacAddress, Payload));
-
-                    var a = new UdpClient();
-                    a.Connect(sendingEndPoint);
-                    a.Send(sendData, sendData.Length);
-                    a.Close();
-                    break;
-                case BulbType.CorsairMouse:
-                    if (Payload is SetColourPayload)
-                    {
-                        var led = Mouse.Leds.FirstOrDefault(x => x.Id.ToString() == ipAddress);
-
-                        System.Drawing.Color colour;
-
-                        if (((SetColourPayload)Payload).RGBColour != null)
-                            colour = ((SetColourPayload)Payload).RGBColour.Value;
-                        else
-                            colour = HsbToRgb(((SetColourPayload)Payload).Hue, ((SetColourPayload)Payload).Saturation / 65535f, ((SetColourPayload)Payload).Brightness / 65535f);
-
-                        _cacheMouseLock.EnterReadLock();
-                        try
-                        {
-                            led.Color = colour;
-                        }
-                        finally
-                        {
-                            _cacheMouseLock.ExitReadLock();
-                        }
-
-                        _cacheMouseLock.EnterWriteLock();
-                        try
-                        {
-                            if ((DateTime.Now - lastCorsairUpdate).TotalMilliseconds > 20)
-                            {
-                                Mouse.Update();
-                                lastCorsairUpdate = DateTime.Now;
-                            }
-                        }
-                        finally
-                        {
-                            _cacheMouseLock.ExitWriteLock();
-                        }
-                    }
-
-                    break;
-                case BulbType.CorsairKeyboard:
-                    if (Payload is SetColourPayload)
-                    {
-                        var led = KeyboardLedDictionary[ipAddress];
-
-                        System.Drawing.Color colour;
-
-                        if (((SetColourPayload)Payload).RGBColour != null)
-                            colour = ((SetColourPayload)Payload).RGBColour.Value;
-                        else
-                            colour = HsbToRgb(((SetColourPayload)Payload).Hue, ((SetColourPayload)Payload).Saturation / 65535f, ((SetColourPayload)Payload).Brightness / 65535f);
-
-                        _cacheLock.EnterReadLock();
-                        try
-                        {
-                            led.Color = colour;
-                        }
-                        finally
-                        {
-                            _cacheLock.ExitReadLock();
-                        }
-
-                        _cacheLock.EnterWriteLock();
-                        try
-                        {
-                            if ((DateTime.Now - lastCorsairKbdUpdate).TotalMilliseconds > 20)
-                            {
-                                Keyboard.Update();
-                                lastCorsairKbdUpdate = DateTime.Now;
-                            }
-                        }
-                        finally
-                        {
-                            _cacheLock.ExitWriteLock();
-                        }
-                    }
-
-                    break;
-                case BulbType.Asus:
-                    if (Payload is SetColourPayload)
-                    {
-                        //if (!auraSDK.Motherboards.Any()) return;
-
-                        if (disappointingAuraColourCache == null)
-                        {
-                            disappointingAuraColourCache = new AuraSDKDotNet.Color[auraSDK.Motherboards[0].LedCount];
-                            for(var i =0; i < disappointingAuraColourCache.Length; i++)
-                            {
-                                disappointingAuraColourCache[i] = new AuraSDKDotNet.Color(0, 0, 0);
-                            }
-                        }
-
-                        var color = (((SetColourPayload)Payload).RGBColour != null)  ? ((SetColourPayload)Payload).RGBColour : 
-                            HsbToRgb(((SetColourPayload)Payload).Hue, ((SetColourPayload)Payload).Saturation / 65535f, ((SetColourPayload)Payload).Brightness / 65535f);
-
-                        var c = new AuraSDKDotNet.Color(color.Value.R,color.Value.G,color.Value.B);
-                        disappointingAuraColourCache[int.Parse(ipAddress)] = c;
-
-                        if ((DateTime.Now - lastAuraUpdate).TotalMilliseconds > 200)
-                        {
-                            new Thread(() =>
-                            {
-                                auraSDK.Motherboards[0].SetColors(disappointingAuraColourCache);
-                            }).Start();
-
-                            //auraSDK.Motherboards[0].SetColors(disappointingAuraColourCache);
-                            lastAuraUpdate = DateTime.Now;
-                        }
-                    }
-
-                        break;
+            // this updates the bulb monitor, skip for multizone lights
+            if (updateBox)
+            {
+                ColourSet?.Invoke(new LabelAndColourPayload() { Label = bulb.Label, Payload = payload }, null);
             }
         }
 
-        private AuraSDKDotNet.Color[] disappointingAuraColourCache;
+        private Dictionary<string, (Bulb, int)> labelToBulbZoneCache = new Dictionary<string, (Bulb, int)>();
+
+        public Bulb GetBulbFromLabel(string label, out int zone)
+        {
+            if (!labelToBulbZoneCache.ContainsKey(label))
+            {
+                var bulb = Bulbs.SingleOrDefault(x => x.Label == label);
+                zone = 0;
+                if (bulb == null)
+                {
+                    bulb = Bulbs.Single(x => x.Label == label.Substring(0, label.LastIndexOf(" (Zone ")));
+
+                    var zonex = label.Substring(label.LastIndexOf(" (Zone ") + 7);
+                    zonex = zonex.Substring(0, zonex.Length - 1);
+                    zone = int.Parse(zonex) - 1;
+                }
+
+                labelToBulbZoneCache.Add(label, (bulb,zone));
+            }
+            zone = labelToBulbZoneCache[label].Item2;
+            return labelToBulbZoneCache[label].Item1;
+        }
+
+        Dictionary<string, byte[]> macAddressCache = new Dictionary<string, byte[]>();
+        public void SendPayloadToMacAddress(IPayload Payload, string macAddress, string ipAddress, UdpClient persistentClient = null)
+        {
+            var fullMac = $"{macAddress}0000";
+            if (!macAddressCache.ContainsKey(fullMac))
+                macAddressCache.Add(fullMac, Utils.StringToByteArray(fullMac));
+            
+            SendPayloadToMacAddress(Payload, macAddressCache[fullMac], ipAddress, persistentClient);
+        }
+
+        public void SendPayloadToMacAddress(IPayload Payload, byte[] targetMacAddress, string ipAddress, UdpClient persistentClient = null)
+        {
+            IPAddress sendToAddress = IPAddress.Parse(ipAddress);
+            IPEndPoint sendingEndPoint = new IPEndPoint(sendToAddress, 56700);
+
+            byte[] sendData = PacketFactory.GetPacket(targetMacAddress, Payload);
+
+            if (persistentClient == null)
+            {
+                var a = new UdpClient();
+                a.Connect(sendingEndPoint);
+                a.Send(sendData, sendData.Length);
+                a.Close();
+            }
+            else persistentClient.Send(sendData, sendData.Length);
+        }
+
+        public static UdpClient GetPersistentClient(string macAddress, string ipAddress)
+        {
+            var targetMacAddress = Utils.StringToByteArray(macAddress + "0000");
+            IPAddress sendToAddress = IPAddress.Parse(ipAddress);
+            IPEndPoint sendingEndPoint = new IPEndPoint(sendToAddress, 56700);
+            var a = new UdpClient();
+            a.Connect(sendingEndPoint);
+            return a;
+        }
+
+        private void recv(IAsyncResult res)
+        {
+            UdpClient u = (UdpClient)((UdpState)(res.AsyncState)).ut;
+            IPEndPoint e = (IPEndPoint)((UdpState)(res.AsyncState)).e;
+
+            byte[] received = u.EndReceive(res, ref e);
+
+            if(Bulbs == null) Bulbs = new List<Bulb>();
+
+                // Get the MAC address of the bulb replying
+                var macAddress = Utils.ByteArrayToString(received).Substring(16, 12);
+                if (macAddress != "000000000000")
+                {
+                    var newBulb = new Bulb() { MacAddress = macAddress, IpAddress = e.Address.ToString() };
+
+                    // Create a new Bulb object
+                    if (Bulbs.Count(x => x.MacAddress == macAddress) == 0)
+                        Bulbs.Add(newBulb);
+                }
+
+            //
+            ////Process codes
+            //
+            //MessageBox.Show(Encoding.UTF8.GetString(received));
+            //Client.BeginReceive(new AsyncCallback(recv), null);
+            
+           //u.BeginReceive(new AsyncCallback(recv), ((UdpState)(res.AsyncState)));
+        }
+
+        UdpClient udpClient;
 
         // The following is based on https://github.com/PhilWheat/LIFX-Control
-        public void DiscoverBulbs(string ip = "")
+        public void DiscoverBulbs(Form f, string ip = "")
         {
-            // Send discovery packet
-            GetServicePayload payload = new GetServicePayload();
-            byte[] sendData = Utils.StringToByteArray(PacketFactory.GetPacket(new byte[8], payload));
-            if (ip != "") _localIp = ip;
-
-            var a = new UdpClient();
-            a.Connect(_sendingEndPoint);
-            a.Send(sendData, sendData.Length);
-            a.Close();
+            //// Send discovery packet
+            //GetServicePayload payload = new GetServicePayload();
+            //byte[] sendData = PacketFactory.GetPacket(new byte[8], payload);
+            //if (ip != "") _localIp = ip;
+            //
+            //udpClient = new UdpClient();
+            //udpClient.Connect(_sendingEndPoint);
+            //udpClient.Send(sendData, sendData.Length);
+            //udpClient.Close();
 
             //_sendingSocket.SendTo(sendData, _sendingEndPoint);
 
             // Listen for replies
-            IPEndPoint remoteIpEndPoint = new IPEndPoint(IPAddress.Any, 0);
-            _receivingUdpClient = new UdpClient(56700);
-            
-            byte[] receivebytes;
 
-            // Pause for a second to allow for slow bulb responses - not uncommmon :/
-            Thread.Sleep(1000);
-            Bulbs = new List<Bulb>();
+
+
+            /*Bulbs = new List<Bulb>();
             // Now loop through received packets
             while (_receivingUdpClient.Available > 0)
             {
@@ -224,23 +181,59 @@ namespace MaxLifx.Controllers
                 var macAddress = Utils.ByteArrayToString(receivebytes).Substring(16, 12);
                 if (macAddress != "000000000000")
                 {
-                    var newBulb = new Bulb() {MacAddress = macAddress, IpAddress = remoteIpEndPoint.Address.ToString()};
+                    var newBulb = new Bulb() { MacAddress = macAddress, IpAddress = remoteIpEndPoint.Address.ToString() };
 
                     // Create a new Bulb object
                     if (Bulbs.Count(x => x.MacAddress == macAddress) == 0)
                         Bulbs.Add(newBulb);
                 }
             }
-
+            
             // Now, find the labels of all the bubs we detected
             GetLabelPayload labelPayload = new GetLabelPayload();
+            // and also the version of each bulb
+            GetVersionPayload versionPayload = new GetVersionPayload();
+            // and zones if any
+            GetColourZonesPayload ColourZonesPayload = new GetColourZonesPayload();
             foreach (var bulb in Bulbs)
             {
-                // Send label request to a specific bulb
-                sendData = Utils.StringToByteArray(PacketFactory.GetPacket(Utils.StringToByteArray(bulb.MacAddress + "0000"), labelPayload));
-
                 a = new UdpClient();
                 a.Connect(_sendingEndPoint);
+                // Send label request to a specific bulb
+                sendData = PacketFactory.GetPacket(Utils.StringToByteArray(bulb.MacAddress + "0000"), labelPayload);
+                a.Send(sendData, sendData.Length);
+                // Send version request to a specific bulb
+                //sendData = Utils.StringToByteArray(PacketFactory.GetPacket(Utils.StringToByteArray(bulb.MacAddress + "0000"), versionPayload));
+                //a.Send(sendData, sendData.Length);
+                a.Close();
+
+                //_sendingSocket.SendTo(sendData, _sendingEndPoint);
+
+                Thread.Sleep(1000);
+
+                while (_receivingUdpClient.Available > 0)
+                {
+                    receivebytes = _receivingUdpClient.Receive(ref remoteIpEndPoint);
+                    if (receivebytes[0] == 0x44 && remoteIpEndPoint.Address.ToString() == bulb.IpAddress)
+                    {
+                        // Parse the received label and mark it against the bulb
+                        var label1 = Utils.HexToAscii(Utils.ByteArrayToString(receivebytes).Substring(36 * 2));
+                        bulb.Label = label1.Substring(0, label1.IndexOf('\0'));
+                    }
+                    // if (receivebytes[0] == 48)
+                    //{
+                        // set the proper version of bulb
+                       // bulb.Version = receivebytes[40];
+                   // } 
+                }
+            }
+            // seperating the 2 seems more reliable
+            foreach (var bulb in Bulbs)
+            {
+                a = new UdpClient();
+                a.Connect(new IPEndPoint(IPAddress.Parse(bulb.IpAddress), 56700));
+                // Send zone request
+                sendData = PacketFactory.GetPacket(Utils.StringToByteArray(bulb.MacAddress + "0000"), ColourZonesPayload);
                 a.Send(sendData, sendData.Length);
                 a.Close();
 
@@ -251,38 +244,179 @@ namespace MaxLifx.Controllers
                 while (_receivingUdpClient.Available > 0)
                 {
                     receivebytes = _receivingUdpClient.Receive(ref remoteIpEndPoint);
-                    if (receivebytes[0] == 0x44)
+                    if (receivebytes[32] == 250 && receivebytes[33] == 1 && remoteIpEndPoint.Address.ToString() == bulb.IpAddress)
                     {
-                        // Parse the received label and mark it against the bulb
-                        var label1 = Utils.HexToAscii(Utils.ByteArrayToString(receivebytes).Substring(36 * 2));
-                        bulb.Label = label1.Substring(0,label1.IndexOf('\0'));
+                        // set the zones count of bulb
+                        bulb.Zones = receivebytes[36];
                     }
                 }
             }
 
-            _receivingUdpClient.Close();
-
-            if(Mouse != null)
+            foreach (var bulb in Bulbs)
             {
-                foreach(var led in Mouse.Leds)
+                a = new UdpClient();
+                a.Connect(_sendingEndPoint);
+                // Send zone request
+
+                
+                sendData = PacketFactory.GetPacket(Utils.StringToByteArray(bulb.MacAddress + "0000"), versionPayload);
+                a.Send(sendData, sendData.Length);
+                a.Close();
+
+                //_sendingSocket.SendTo(sendData, _sendingEndPoint);
+
+                Thread.Sleep(1000);
+
+                while (_receivingUdpClient.Available > 0)
                 {
-                    Bulbs.Add(new Bulb() { Label = $"Corsair Mouse {led.Id.ToString()}", BulbType = BulbType.CorsairMouse, IpAddress = led.Id.ToString() });
+                    receivebytes = _receivingUdpClient.Receive(ref remoteIpEndPoint);
+                    if (receivebytes[32] == 0x13)
+                    {
+
+                        System.Diagnostics.Debug.WriteLine(Utils.ByteArrayToString(receivebytes));
+                    
+                  //      if (bulb.MacAddress.StartsWith("01"))
+                    {
+                        System.Diagnostics.Debug.WriteLine("01 ^^^^");
+                    }
+
+                    // set the proper version of bulb
+                    // bulb.Version = receivebytes[40];
+                     } 
                 }
             }
+            */
+            
+            //_receivingUdpClient.Close();
+        }
 
-            if (Keyboard != null)
+        public void UdpDiscoveryListen(Func<int> callback) {
+            //_receivingUdpClient = new UdpClient(56700);
+
+            Bulbs.Clear();
+            byte[] sendData;
+            Bulb bulb;
+
+            GetServicePayload payload = new GetServicePayload();
+            sendData = PacketFactory.GetPacket(new byte[8], payload);
+            var udpClient2 = new UdpClient();
+            udpClient2.Connect(_sendingEndPoint);
+            udpClient2.Send(sendData, sendData.Length);
+            udpClient2.Close();
+
+            using (var udpClient = new UdpClient())
             {
-                foreach (var led in Keyboard.Leds)
+                udpClient.ExclusiveAddressUse = false;
+                udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                udpClient.Client.Bind(new IPEndPoint(IPAddress.Parse("0.0.0.0"), 56700));
+
+
+                while (true)
                 {
-                    Bulbs.Add(new Bulb() { Label = $"Corsair Keyboard {led.Id.ToString()}", BulbType = BulbType.CorsairKeyboard, IpAddress = led.Id.ToString() });
+                    //IPEndPoint object will allow us to read datagrams sent from any source.
+                    var remoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
+                    var receivebytes = udpClient.Receive(ref remoteEndPoint);
+
+                    // Get the MAC address of the bulb replying
+                    var macAddress = Utils.ByteArrayToString(receivebytes).Substring(16, 12);
+                    if (macAddress != "000000000000")
+                    {
+                        System.Diagnostics.Debug.WriteLine($"{macAddress} : {receivebytes[32] + ((receivebytes[33] * 256))}");
+                        switch (receivebytes[32])
+                        {
+                            case 3:
+                                var newBulb = new Bulb() { MacAddress = macAddress, IpAddress = remoteEndPoint.Address.ToString() };
+                            
+                                // Create a new Bulb object
+                                if (Bulbs.Count(x => x.MacAddress == macAddress) == 0)
+                                {
+                                    Bulbs.Add(newBulb);
+
+                                    // Send a GetLabel
+                                    GetLabelPayload labelPayload = new GetLabelPayload();
+                                    sendData = PacketFactory.GetPacket(Utils.StringToByteArray(newBulb.MacAddress + "0000"), labelPayload);
+                                    SendDataPacket(sendData, remoteEndPoint);
+
+                                }
+
+
+                                break;
+                            case 25: // State Label
+                                bulb = Bulbs.FirstOrDefault(x => x.MacAddress == macAddress);
+                            
+                                if (bulb != null)
+                                {
+                                    // Parse the received label and mark it against the bulb
+                                    var label1 = Utils.HexToAscii(Utils.ByteArrayToString(receivebytes).Substring(36 * 2));
+                                    bulb.Label = label1.Substring(0, label1.IndexOf('\0'));
+
+                                    callback.Invoke();
+                                    //f.PopulateBulbListbox();
+                                    //f._suspendUi = false;
+                                    //f.SaveSettings();
+                                    //f._suspendUi = true;
+                                    
+                                    GetColourZonesPayload ColourZonesPayload = new GetColourZonesPayload();
+                            
+                                    sendData = PacketFactory.GetPacket(Utils.StringToByteArray(bulb.MacAddress + "0000"), ColourZonesPayload);
+                                    SendDataPacket(sendData, remoteEndPoint);
+                                }
+                                break;
+                            case 247:
+                            case 250:
+                                if (receivebytes[33] == 1) // 503 Zones
+                                {
+                                    bulb = Bulbs.FirstOrDefault(x => x.MacAddress == macAddress);
+
+                                    if (bulb != null)
+                                    {
+                                        bulb.Zones = receivebytes[36];
+
+                                        callback.Invoke();
+                                    }
+                                }
+                                break;
+                            default:
+
+                                break;
+                        }
+
+                    }
+
+                    //loggingEvent += Encoding.ASCII.GetString(receivedResults);
                 }
+
             }
 
-            if (auraSDK != null && auraSDK.Motherboards.Length > 0)
-            {
-                for (var i = 0; i < auraSDK.Motherboards[0].LedCount; i++)
-                    Bulbs.Add(new Bulb() { BulbType = BulbType.Asus, Label = $"Asus {i}", IpAddress = i.ToString()});
+//            var udpState = new UdpState { e = remoteIpEndPoint, ut = _receivingUdpClient };
+            /*             UdpClient u = (UdpClient)((UdpState)(res.AsyncState)).ut;
+            IPEndPoint e = (IPEndPoint)((UdpState)(res.AsyncState)).e;
 
+            byte[] received = u.EndReceive(res, ref e);
+
+            if(Bulbs == null) Bulbs = new List<Bulb>();
+
+                // Get the MAC address of the bulb replying
+                var macAddress = Utils.ByteArrayToString(received).Substring(16, 12);
+                if (macAddress != "000000000000")
+                {
+                    var newBulb = new Bulb() { MacAddress = macAddress, IpAddress = e.Address.ToString() };
+
+                    // Create a new Bulb object
+                    if (Bulbs.Count(x => x.MacAddress == macAddress) == 0)
+                        Bulbs.Add(newBulb);
+                } */
+        }
+
+        private static void SendDataPacket(byte[] sendData, IPEndPoint remoteEndPoint)
+        {
+            using (var u2 = new UdpClient())
+            {
+                u2.ExclusiveAddressUse = false;
+                u2.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                u2.Client.Bind(new IPEndPoint(IPAddress.Parse("0.0.0.0"), 56700));
+                u2.Connect(remoteEndPoint.Address, 56700);
+                u2.Send(sendData, sendData.Length);
             }
         }
 
@@ -297,6 +431,7 @@ namespace MaxLifx.Controllers
             //_sendingSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
             SetupNetwork(_localIp);
+
         }
 
         private void SetupNetwork(string ip)
@@ -304,60 +439,15 @@ namespace MaxLifx.Controllers
             _localIp = ip;
             _sendToAddress = IPAddress.Parse(ip);
             _sendingEndPoint = new IPEndPoint(_sendToAddress, 56700);
-
-            try
-            {
-                CueSDK.Initialize();
-                if(CueSDK.KeyboardSDK != null) CueSDK.KeyboardSDK.Brush = (SolidColorBrush)System.Drawing.Color.Transparent;
-                if (CueSDK.MouseSDK != null) CueSDK.MouseSDK.Brush = (SolidColorBrush)System.Drawing.Color.Transparent;
-                Mouse = CueSDK.MouseSDK;
-                Keyboard = CueSDK.KeyboardSDK;
-                if (Keyboard != null) KeyboardLedDictionary = Keyboard.Leds.ToDictionary(x => x.Id.ToString(), x => x);
-            }
-            catch (Exception e) { }
-
-            auraSDK = new AuraSDK();
         }
+    }
 
-        public static System.Drawing.Color HsbToRgb(double h, double s, double b)
-        {
-            if (s == 0)
-                return RawRgbToRgb(b, b, b);
-            else
-            {
-                var sector = h / 60;
-                var sectorNumber = (int)Math.Truncate(sector);
-                var sectorFraction = sector - sectorNumber;
-                var b1 = b * (1 - s);
-                var b2 = b * (1 - s * sectorFraction);
-                var b3 = b * (1 - s * (1 - sectorFraction));
-                switch (sectorNumber)
-                {
-                    case 0:
-                        return RawRgbToRgb(b, b3, b1);
-                    case 1:
-                        return RawRgbToRgb(b2, b, b1);
-                    case 2:
-                        return RawRgbToRgb(b1, b, b3);
-                    case 3:
-                        return RawRgbToRgb(b1, b2, b);
-                    case 4:
-                        return RawRgbToRgb(b3, b1, b);
-                    case 5:
-                        return RawRgbToRgb(b, b1, b2);
-                    default:
-                        return RawRgbToRgb(0, 0, 0);
-                }
-            }
-        }
-
-        private static System.Drawing.Color RawRgbToRgb(double rawR, double rawG, double rawB)
-        {
-            if (rawR < 0 || rawG < 0 || rawB < 0) return System.Drawing.Color.Black;
-            return System.Drawing.Color.FromArgb(
-                (int)Math.Round(rawR * 255),
-                (int)Math.Round(rawG * 255),
-                (int)Math.Round(rawB * 255));
-        }
+    public class UdpState
+    {
+        public UdpClient ut;
+        public IPEndPoint e;
+        public const int BufferSize = 1024;
+        public byte[] buffer = new byte[BufferSize];
+        public int counter = 0;
     }
 }

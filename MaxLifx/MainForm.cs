@@ -1,20 +1,21 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Security.Authentication;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Timers;
 using System.Windows.Forms;
+using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Serialization;
 using MaxLifx.Controllers;
 using MaxLifx.Controls;
-using MaxLifx.Packets;
 using MaxLifx.Payload;
 using MaxLifx.Threads;
 using MaxLifx.UIs;
@@ -27,22 +28,21 @@ namespace MaxLifx
     public partial class MainForm : Form
     {
         private readonly MaxLifxBulbController _bulbController = new MaxLifxBulbController();
-        private readonly List<IBulbController> controllers = new List<IBulbController>();
-
-        private bool _suspendUi = true;
+        public bool _suspendUi = true;
         private readonly LightControlThreadCollection _threadCollection = new LightControlThreadCollection();
         private readonly Random _r = new Random();
-        public readonly decimal Version = 0.5m;
+        private readonly int _thumbSize = 100;
+        public readonly decimal Version = 1.1m;
         private Mp3FileReader _schedulerReader;
         private DateTime _schedulerStartTime;
         private Timer _schedulerTimer = new Timer();
         private WaveOut _schedulerWaveOut;
         private MaxLifxSettings _settings = new MaxLifxSettings();
+        private bool _collapseSequencerToggle = true;
+        private bool _collapseToggle;
 
         public MainForm(string loadProfileName)
         {
-            controllers.Add(_bulbController);
-            
             // this.Icon = new System.Drawing.Icon("Resources\\Image1.ico");
             Bitmap bmp = MaxLifx.Properties.Resources.m__1_;
             this.Icon = Icon.FromHandle(bmp.GetHicon());
@@ -69,9 +69,9 @@ namespace MaxLifx
 
             InitializeComponent();
             _suspendUi = true;
-
-            foreach (var controller in controllers) controller.SetupNetwork();
+            _bulbController.SetupNetwork();
             
+            // try and load settings
             if (File.Exists("Settings.xml"))
             {
                 LoadSettings();
@@ -84,44 +84,60 @@ namespace MaxLifx
                         lbBulbs.SelectedItems.Add(lbBulbs.Items[i]);
             }
 
-            foreach (var controller in controllers)
+            if (_bulbController.Bulbs.Count == 0)
             {
-                if (controller.Bulbs.Count == 0)
+                var dialogResult =
+                    MessageBox.Show(
+                        "No bulbs discovered. Run bulb discovery now? The app willl hang for about ten seconds."
+                        , "Discover bulbs?",
+                        MessageBoxButtons.YesNo);
+
+                if (dialogResult == DialogResult.Yes)
                 {
-                    var dialogResult =
-                        MessageBox.Show(
-                            "No bulbs discovered.  Run bulb discovery now?  The app willl hang for about ten seconds."
-                            , "Discover bulbs?",
-                            MessageBoxButtons.YesNo);
 
-                    if (dialogResult == DialogResult.Yes)
+
+
+                    DiscoverBulbs();
+
+                    if (_bulbController.Bulbs.Count == 0)
                     {
-
-                        controller.DiscoverBulbs();
-
-                        if (controller.Bulbs.Count == 0)
-                        {
-                            MessageBox.Show("No bulbs found. If you have just received a Windows Firewall popup, try Bulbs -> Discover Bulbs now.");
-                        }
-
-                        PopulateBulbListbox();
-                        _suspendUi = false;
-                        SaveSettings();
-                        _suspendUi = true;
-
+                        MessageBox.Show("No bulbs found. If you have just received a Windows Firewall popup, try Bulbs -> Discover Bulbs now.");
                     }
-                }
 
-                _suspendUi = false;
-                controller.ColourSet += BulbControllerOnColourSet;
+                    PopulateBulbListbox();
+                    _suspendUi = false;
+                    SaveSettings();
+                    _suspendUi = true;
+
+                }
             }
-            if(!String.IsNullOrWhiteSpace(loadProfileName))
-            LoadThreads(loadProfileName + ".MaxLifx.Threadset.xml");
+
+            _suspendUi = false;
+            _bulbController.ColourSet += BulbControllerOnColourSet;
+            if (!String.IsNullOrWhiteSpace(loadProfileName))
+                LoadThreads(loadProfileName + ".MaxLifx.Threadset.xml");
         }
 
-        private void BulbControllerOnColourSet(object sender, EventArgs eventArgs)
+        public void DiscoverBulbs(string ip = "")
         {
-           /* if (InvokeRequired) // Line #1
+
+            Task.Run(() => _bulbController.UdpDiscoveryListen(
+                () =>
+                {
+                    PopulateBulbListbox();
+                    _suspendUi = false;
+                    SaveSettings();
+                    _suspendUi = true;
+
+                    return 0;
+
+                }
+                ));
+        }
+
+            private void BulbControllerOnColourSet(object sender, EventArgs eventArgs)
+        {
+            if (InvokeRequired) // Line #1
             {
                 BulbControllerOnColourSetDelegate d = BulbControllerOnColourSet;
                 Invoke(d, sender, eventArgs);
@@ -179,7 +195,7 @@ namespace MaxLifx
                 };
                 b.Click += B_Click;
                 panelBulbColours.Controls.Add(b);
-            }*/
+            }
         }
 
         private void B_Click(object sender, EventArgs e)
@@ -230,10 +246,16 @@ namespace MaxLifx
             _bulbController.Bulbs = _settings.Bulbs;
         }
 
-        private void PopulateBulbListbox()
+        public void PopulateBulbListbox()
         {
+            if (InvokeRequired) // Line #1
+            {
+                this.Invoke(new MethodInvoker(PopulateBulbListbox));
+                return;
+            }
+
             lbBulbs.Items.Clear();
-            Text = $"MaxLifx : {_bulbController.Bulbs.Count} bulbs (";
+            Text = $"MaxLifx-Z : {_bulbController.Bulbs.Count} bulbs (";
             int ctr = 0;
             foreach (var b in _bulbController.Bulbs.OrderBy(x => x.Label))
             {
@@ -357,20 +379,22 @@ namespace MaxLifx
             }
         }
 
-        private void SaveSettings(string filename = "Settings.xml")
+        public void SaveSettings(string filename = "Settings.xml")
         {
             if (!_suspendUi)
             {
-                var xml = new XmlSerializer(typeof (MaxLifx.MaxLifxSettings));
+                var xml = new XmlSerializer(typeof (MaxLifxSettings));
                 _settings.Bulbs = _bulbController.Bulbs;
 
                 using (var stream = new MemoryStream())
                 {
                     xml.Serialize(stream, _settings);
                     stream.Position = 0;
+
                     var xmlDocument = new XmlDocument();
                     xmlDocument.Load(stream);
                     xmlDocument.Save(filename);
+                    
                     stream.Close();
                 }
             }
@@ -527,26 +551,287 @@ namespace MaxLifx
             s.ShowUI = true;
         }
 
+        private void button9_Click(object sender, EventArgs e)
+        {
+            foreach (var evt in timeline1.TimelineEvents)
+                evt.Fired = false;
+
+            _schedulerTimer.Elapsed += OnSchedulerElapsed;
+            _schedulerTimer.Interval = 100;
+            _schedulerTimer.Enabled = true;
+            _schedulerStartTime = DateTime.Now;
+        }
+
+        private void OnSchedulerElapsed(object sender, ElapsedEventArgs e)
+        {
+            var elapsedTime = DateTime.Now - _schedulerStartTime;
+            SetSchedulerTimeTextBox(elapsedTime);
+
+            timeline1.PlaybackTime = (float) (elapsedTime.TotalMilliseconds);
+
+            if ((timeline1.PlaybackTime > (timeline1.ViewableWindowSize/2 + timeline1.ViewableWindow.X))
+                ||
+                (timeline1.PlaybackTime < (timeline1.ViewableWindow.X - timeline1.ViewableWindowSize/2)))
+            {
+                var windowSize = timeline1.ViewableWindowSize;
+
+                timeline1.ViewableWindow.X = timeline1.PlaybackTime - windowSize/2;
+                timeline1.ViewableWindow.Y = timeline1.PlaybackTime + windowSize/2;
+            }
+
+            foreach (
+                var evt in
+                    timeline1.TimelineEvents.Where(x => x.Fired == false && x.Time < elapsedTime.TotalMilliseconds))
+            {
+                evt.Fired = true;
+
+                switch (evt.Action)
+                {
+                    case TimelineEventAction.StartThreadSet:
+                        StopAllThreads();
+                        LoadThreads(evt.Parameter);
+                        break;
+                    case TimelineEventAction.PlayMp3:
+                        PlayMp3(evt, TimeSpan.Zero);
+                        break;
+                    case TimelineEventAction.Unspecified:
+                        break;
+                }
+            }
+        }
+
+        private void PlayMp3(TimelineEvent evt, TimeSpan startTime)
+        {
+            if (_schedulerWaveOut != null)
+            {
+                _schedulerWaveOut.Stop();
+
+                if (_schedulerReader != null)
+                {
+                    _schedulerReader.Close();
+                    _schedulerReader.Dispose();
+                }
+
+                _schedulerWaveOut.Dispose();
+                _schedulerWaveOut = null;
+            }
+
+            _schedulerReader = new Mp3FileReader(evt.Parameter);
+            _schedulerWaveOut = new WaveOut(); // or WaveOutEvent()
+
+            _schedulerReader.CurrentTime = startTime;
+
+            _schedulerWaveOut.Init(_schedulerReader);
+            _schedulerWaveOut.Play();
+        }
+
+        private void SetSchedulerTimeTextBox(TimeSpan elapsedTime)
+        {
+            if (InvokeRequired) // Line #1
+            {
+                SetSchedulerTimeTextBoxDelegate d = SetSchedulerTimeTextBox;
+                Invoke(d, elapsedTime);
+                return;
+            }
+            tbSchedTime.Text = ((((int) elapsedTime.TotalMilliseconds)/100)/10f).ToString();
+        }
+
+        private void bSaveSched_Click(object sender, EventArgs e)
+        {
+            var s = new SaveFileDialog {DefaultExt = ".MaxLifx.Sequence.xml"};
+            s.Filter = "XML files (*.MaxLifx.Sequence.xml)|*.MaxLifx.Sequence.xml";
+            s.InitialDirectory = Directory.GetCurrentDirectory();
+            s.AddExtension = true;
+
+            if (s.ShowDialog() == DialogResult.OK)
+            {
+                var xml = new XmlSerializer(typeof (List<TimelineEvent>));
+                using (var stream = new MemoryStream())
+                {
+                    xml.Serialize(stream, timeline1.TimelineEvents);
+                    stream.Position = 0;
+                    var xmlDocument = new XmlDocument();
+                    xmlDocument.Load(stream);
+                    xmlDocument.Save(s.FileName);
+                    stream.Close();
+                }
+            }
+        }
+
+        private void button10_Click(object sender, EventArgs e)
+        {
+            var s = new OpenFileDialog {DefaultExt = ".MaxLifx.Sequence.xml"};
+            s.Filter = "XML files (*.MaxLifx.Sequence.xml)|*.MaxLifx.Sequence.xml";
+            s.InitialDirectory = Directory.GetCurrentDirectory();
+            s.AddExtension = true;
+
+            if (s.ShowDialog() == DialogResult.OK)
+            {
+                var serializer = new XmlSerializer(typeof (List<TimelineEvent>));
+                using (XmlReader reader = new XmlTextReader(s.FileName))
+                {
+                    timeline1.TimelineEvents = (List<TimelineEvent>) serializer.Deserialize(reader);
+                    timeline1.Invalidate();
+                    reader.Close();
+                }
+                foreach (var evt in timeline1.TimelineEvents)
+                    timeline1.PopulateBitmapCache(evt);
+            }
+        }
+
+        private void bTimelineAdd_Click(object sender, EventArgs e)
+        {
+            var evt = new TimelineEvent
+            {
+                Time = (long) timeline1.PlaybackTime,
+                Parameter = @"",
+                Action = TimelineEventAction.Unspecified
+            };
+            timeline1.AddEvent(evt);
+        }
+
+        private void button11_Click(object sender, EventArgs e)
+        {
+            TimelineEvent eventToEdit;
+            var editMultiple = false;
+
+            if (timeline1.SelectedEvents.Count != 1)
+            {
+                eventToEdit = new TimelineEvent();
+                editMultiple = true;
+            }
+            else eventToEdit = timeline1.SelectedEvents.Single();
+
+            var f = new EditTimelineEvent(eventToEdit, editMultiple);
+            f.ShowDialog();
+
+            if (editMultiple)
+            {
+                foreach (var evt in timeline1.SelectedEvents)
+                {
+                    evt.Action = f.EditEvent.Action;
+                    evt.Parameter = f.EditEvent.Parameter;
+                    timeline1.PopulateBitmapCache(evt);
+                }
+            }
+            else timeline1.PopulateBitmapCache(f.EditEvent);
+
+            timeline1.Invalidate();
+        }
+
+        private void bDelete_Click(object sender, EventArgs e)
+        {
+            foreach (var evt in timeline1.SelectedEvents)
+                timeline1.DeleteEvent(evt);
+
+            timeline1.SelectedEvents.Clear();
+        }
+
+        private void bContinue_Click(object sender, EventArgs e)
+        {
+            if (!_schedulerTimer.Enabled)
+            {
+                _schedulerTimer.Elapsed += OnSchedulerElapsed;
+                _schedulerTimer.Interval = 100;
+                _schedulerTimer.Enabled = true;
+
+                _schedulerStartTime = DateTime.Now - new TimeSpan(0, 0, 0, 0, (int) timeline1.PlaybackTime);
+
+                foreach (
+                    var evt in
+                        timeline1.TimelineEvents.Where(
+                            x =>
+                                x.Action == TimelineEventAction.PlayMp3 && x.Time < timeline1.PlaybackTime &&
+                                (x.Time + timeline1.WaveBitmapDurations[x.Parameter]*1000 > timeline1.PlaybackTime)))
+                {
+                    //var start
+                    var startTime = timeline1.PlaybackTime - evt.Time;
+                    var startTimeSpan = new TimeSpan(0, 0, 0, 0, (int) startTime);
+                    PlayMp3(evt, startTimeSpan);
+                }
+            }
+            else
+            {
+                _schedulerTimer.Enabled = false;
+                _schedulerTimer.Dispose();
+                _schedulerTimer = new Timer();
+
+                if (_schedulerWaveOut != null)
+                {
+                    _schedulerWaveOut.Stop();
+
+                    if (_schedulerReader != null)
+                    {
+                        _schedulerReader.Close();
+                        _schedulerReader.Dispose();
+                    }
+
+                    _schedulerWaveOut.Dispose();
+                    _schedulerWaveOut = null;
+                }
+            }
+        }
+
+        private void bCollapseMonitors_Click(object sender, EventArgs e)
+        {
+            if (_collapseToggle)
+            {
+                gbMonitors.Size = new Size(753, 166);
+                gbSequencer.Location = new Point(gbSequencer.Location.X, gbSequencer.Location.Y + 146);
+                MaximumSize = new Size(Size.Width, Size.Height + 146);
+                MinimumSize = new Size(Size.Width, Size.Height + 146);
+                Size = new Size(Size.Width, Size.Height + 146);
+                bCollapseSequencer.Location = new Point(bCollapseSequencer.Location.X,
+                    bCollapseSequencer.Location.Y + 146);
+            }
+            else
+            {
+                gbMonitors.Size = new Size(753, 18);
+                gbSequencer.Location = new Point(gbSequencer.Location.X, gbSequencer.Location.Y - 146);
+                MinimumSize = new Size(Size.Width, Size.Height - 146);
+                MaximumSize = new Size(Size.Width, Size.Height - 146);
+                Size = new Size(Size.Width, Size.Height - 146);
+                bCollapseSequencer.Location = new Point(bCollapseSequencer.Location.X,
+                    bCollapseSequencer.Location.Y - 146);
+            }
+
+            _collapseToggle = !_collapseToggle;
+        }
+
+        private void bCollapseSequencer_Click(object sender, EventArgs e)
+        {
+            if (_collapseSequencerToggle)
+            {
+                gbSequencer.Size = new Size(753, 309);
+                MaximumSize = new Size(Size.Width, Size.Height + 291);
+                MinimumSize = new Size(Size.Width, Size.Height + 291);
+                Size = new Size(Size.Width, Size.Height + 291);
+            }
+            else
+            {
+                gbSequencer.Size = new Size(753, 18);
+                MinimumSize = new Size(Size.Width, Size.Height - 291);
+                MaximumSize = new Size(Size.Width, Size.Height - 291);
+                Size = new Size(Size.Width, Size.Height - 291);
+            }
+
+            _collapseSequencerToggle = !_collapseSequencerToggle;
+        }
 
         private void MainForm_Load(object sender, EventArgs e)
         {
             try
             {
                 string sURL;
-                sURL = @"https://api.github.com/repos/stringandstickytape/MaxLifx/releases";
+                sURL = @"https://api.github.com/repos/gitCommitWiL/MaxLifx-Z/releases";
                 string response;
 
                 var webRequest = WebRequest.Create(sURL) as HttpWebRequest;
                 webRequest.Method = "GET";
                 webRequest.ServicePoint.Expect100Continue = false;
-                webRequest.KeepAlive = false;
                 webRequest.UserAgent = "YourAppName";
 
-                const SslProtocols _Tls12 = (SslProtocols)0x00000C00;
-                const SecurityProtocolType Tls12 = (SecurityProtocolType)_Tls12;
-                ServicePointManager.SecurityProtocol = Tls12;
-
-                decimal maxVersion = .7M;
+                decimal maxVersion = -1;
 
                 using (var responseReader = new StreamReader(webRequest.GetResponse().GetResponseStream()))
                     response = responseReader.ReadToEnd();
@@ -581,7 +866,7 @@ namespace MaxLifx
 
                     if (dialogResult == DialogResult.Yes)
                     {
-                        Process.Start(@"https://github.com/stringandstickytape/MaxLifx/releases");
+                        Process.Start(@"https://github.com/gitCommitWiL/MaxLifx-Z/releases");
                         Application.Exit();
                     }
                 }
@@ -608,7 +893,7 @@ namespace MaxLifx
 
         private void toolStripMenuItem1_Click(object sender, EventArgs e)
         {
-            _bulbController.DiscoverBulbs();
+            DiscoverBulbs();
 
             if (_bulbController.Bulbs.Count == 0)
             {
@@ -701,7 +986,7 @@ namespace MaxLifx
 
         private void advancedDiscoverToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            _bulbController.DiscoverBulbs("255.255.255.255");
+            DiscoverBulbs(ConfigurationManager.AppSettings["subnet"]);
 
             if (_bulbController.Bulbs.Count == 0)
             {
